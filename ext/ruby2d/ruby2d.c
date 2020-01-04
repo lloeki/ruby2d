@@ -18,6 +18,7 @@
   #include <mruby/irep.h>
 #else
   #include <ruby.h>
+  #include <ruby/thread.h>
 #endif
 
 // Define Ruby type conversions in MRuby
@@ -738,11 +739,16 @@ static void free_music(S2D_Music *mus) {
   S2D_FreeMusic(mus);
 }
 
+struct args_S2D_Event {
+    S2D_Event *event;
+};
 
 /*
  * Simple 2D `on_key` input callback function
  */
-static void on_key(S2D_Event e) {
+static void *on_key_gvl(void *data) {
+  struct args_S2D_Event *args = data;
+  S2D_Event e = *(args->event);
 
   R_VAL type;
 
@@ -759,13 +765,23 @@ static void on_key(S2D_Event e) {
   }
 
   r_funcall(ruby2d_window, "key_callback", 2, type, r_str_new(e.key));
+  return NULL;
+}
+
+static void on_key(S2D_Event e) {
+    struct args_S2D_Event args = {
+        .event = &e,
+    };
+    rb_thread_call_with_gvl(on_key_gvl, &args);
 }
 
 
 /*
  * Simple 2D `on_mouse` input callback function
  */
-void on_mouse(S2D_Event e) {
+static void *on_mouse_gvl(void *data) {
+  struct args_S2D_Event *args = data;
+  S2D_Event e = *(args->event);
 
   R_VAL type = R_NIL; R_VAL button = R_NIL; R_VAL direction = R_NIL;
 
@@ -814,13 +830,23 @@ void on_mouse(S2D_Event e) {
     ruby2d_window, "mouse_callback", 7, type, button, direction,
     INT2NUM(e.x), INT2NUM(e.y), INT2NUM(e.delta_x), INT2NUM(e.delta_y)
   );
+  return NULL;
+}
+
+static void on_mouse(S2D_Event e) {
+    struct args_S2D_Event args = {
+        .event = &e,
+    };
+    rb_thread_call_with_gvl(on_mouse_gvl, &args);
 }
 
 
 /*
  * Simple 2D `on_controller` input callback function
  */
-static void on_controller(S2D_Event e) {
+static void *on_controller_gvl(void *data) {
+  struct args_S2D_Event *args = data;
+  S2D_Event e = *(args->event);
 
   R_VAL type = R_NIL; R_VAL axis = R_NIL; R_VAL button = R_NIL;
 
@@ -910,13 +936,20 @@ static void on_controller(S2D_Event e) {
     ruby2d_window, "controller_callback", 5, INT2NUM(e.which),
     type, axis, DBL2NUM(normalize_controller_axis(e.value)), button
   );
+  return NULL;
 }
 
+static void on_controller(S2D_Event e) {
+    struct args_S2D_Event args = {
+        .event = &e,
+    };
+    rb_thread_call_with_gvl(on_controller_gvl, &args);
+}
 
 /*
  * Simple 2D `update` callback function
  */
-static void update() {
+static void *update_gvl() {
 
   // Set the cursor
   r_iv_set(ruby2d_window, "@mouse_x", INT2NUM(window->mouse.x));
@@ -930,14 +963,18 @@ static void update() {
 
   // Call update proc, `window.update`
   r_funcall(ruby2d_window, "update_callback", 0);
+  return NULL;
+}
+
+static void update() {
+    rb_thread_call_with_gvl(update_gvl, NULL);
 }
 
 
 /*
  * Simple 2D `render` callback function
  */
-static void render() {
-
+static void *render_gvl() {
   // Set background color
   R_VAL bc = r_iv_get(ruby2d_window, "@background");
   window->background.r = NUM2DBL(r_iv_get(bc, "@r"));
@@ -954,6 +991,11 @@ static void render() {
     R_VAL el = r_ary_entry(objects, i);
     r_funcall(el, "ext_render", 0);
   }
+  return NULL;
+}
+
+static void render() {
+    rb_thread_call_with_gvl(render_gvl, NULL);
 }
 
 
@@ -1004,6 +1046,15 @@ static R_VAL ruby2d_window_ext_add_controller_mappings(R_VAL self, R_VAL path) {
   return R_NIL;
 }
 
+struct args_S2D_Window {
+    S2D_Window *window;
+};
+
+static void *func_S2D_Show_no_gvl(void *data) {
+    struct args_S2D_Window *args = data;
+    S2D_Show(args->window);
+    return NULL;
+}
 
 /*
  * Ruby2D::Window#ext_show
@@ -1066,7 +1117,10 @@ static R_VAL ruby2d_window_ext_show(R_VAL self) {
   window->on_mouse        = on_mouse;
   window->on_controller   = on_controller;
 
-  S2D_Show(window);
+  struct args_S2D_Window args = {
+      .window = window,
+  };
+  rb_thread_call_without_gvl(func_S2D_Show_no_gvl, &args, RUBY_UBF_IO, NULL);
 
   atexit(free_window);
   return R_NIL;
